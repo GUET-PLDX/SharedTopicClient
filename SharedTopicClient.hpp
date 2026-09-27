@@ -15,6 +15,7 @@ depends: []
 === END MANIFEST === */
 // clang-format on
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -77,9 +78,11 @@ class SharedTopicClient : public LibXR::Application {
 
     ASSERT(max_packet_size <= uart_->write_port_->queue_data_->MaxSize());
 
+    const size_t QUEUE_CAPACITY =
+        LibXR::max(static_cast<size_t>(slot_count), size_t{2});
     packets_ = new PacketSlot[slot_count];
-    free_slots_ = new LibXR::MPMCQueue<uint32_t>(slot_count + 1);
-    ready_packets_ = new LibXR::MPMCQueue<ReadyPacket>(slot_count);
+    free_slots_ = new LibXR::MPMCQueue<uint32_t>(QUEUE_CAPACITY);
+    ready_packets_ = new LibXR::MPMCQueue<ReadyPacket>(QUEUE_CAPACITY);
     for (uint32_t i = 0; i < slot_count; i++) {
       packets_[i].buffer =
           LibXR::RawData(new uint8_t[max_packet_size], max_packet_size);
@@ -119,6 +122,19 @@ class SharedTopicClient : public LibXR::Application {
  private:
   void OnTopic(bool in_isr, CallbackInfo info,
                const LibXR::Topic::RawMessageView& message) {
+    // Topic 回调可能在任务与中断上下文间相互抢占。MPMCQueue 允许多个消费者，
+    // 但空闲槽队列同时也由发送路径归还；消费者尚未发布完成时，归还方会把
+    // 暂态窗口误判为 FULL。这里沿用背压语义，重入时直接丢弃本次更新。
+    if (topic_dispatch_running_.test_and_set(std::memory_order_acquire)) {
+      return;
+    }
+
+    ProcessTopic(in_isr, info, message);
+    topic_dispatch_running_.clear(std::memory_order_release);
+  }
+
+  void ProcessTopic(bool in_isr, CallbackInfo info,
+                    const LibXR::Topic::RawMessageView& message) {
     const size_t packet_size =
         message.payload.size_ + LibXR::Topic::PACK_BASE_SIZE;
     uint32_t slot_index = 0;
@@ -141,10 +157,22 @@ class SharedTopicClient : public LibXR::Application {
       ReturnFreeSlot(slot_index);
       return;
     }
-    KickTx(in_isr);
+    RequestTx(in_isr);
   }
 
-  void KickTx(bool in_isr) { tx_callback_.Run(in_isr, LibXR::ErrorCode::OK); }
+  void RequestTx(bool in_isr) {
+    tx_pending_.store(true, std::memory_order_release);
+    if (tx_running_.test_and_set(std::memory_order_acquire)) {
+      return;
+    }
+
+    do {
+      tx_pending_.store(false, std::memory_order_release);
+      TxService(in_isr);
+    } while (tx_pending_.load(std::memory_order_acquire));
+
+    tx_running_.clear(std::memory_order_release);
+  }
 
   void TxService(bool in_isr) {
     ReadyPacket packet;
@@ -153,22 +181,30 @@ class SharedTopicClient : public LibXR::Application {
     }
 
     auto& slot = packets_[packet.slot_index];
+    active_slot_.store(packet.slot_index, std::memory_order_release);
     auto write_status =
         uart_->Write(LibXR::ConstRawData{slot.buffer.addr_, packet.packet_size},
                      tx_op_, in_isr);
     if (static_cast<int8_t>(write_status) < 0) {
-      ReturnFreeSlot(packet.slot_index);
+      const uint32_t active_slot =
+          active_slot_.exchange(INVALID_SLOT, std::memory_order_acq_rel);
+      if (active_slot != INVALID_SLOT) {
+        ReturnFreeSlot(active_slot);
+      }
       return;
     }
-
-    ReturnFreeSlot(packet.slot_index);
   }
 
   void OnWriteDone(bool in_isr, LibXR::ErrorCode status) {
+    const uint32_t active_slot =
+        active_slot_.exchange(INVALID_SLOT, std::memory_order_acq_rel);
+    if (active_slot != INVALID_SLOT) {
+      ReturnFreeSlot(active_slot);
+    }
     if (static_cast<int8_t>(status) < 0) {
       return;
     }
-    TxService(in_isr);
+    RequestTx(in_isr);
   }
 
   void ReturnFreeSlot(uint32_t slot_index) {
@@ -181,4 +217,9 @@ class SharedTopicClient : public LibXR::Application {
   LibXR::MPMCQueue<ReadyPacket>* ready_packets_ = nullptr;
   LibXR::Callback<LibXR::ErrorCode> tx_callback_;
   LibXR::WriteOperation tx_op_;
+  static constexpr uint32_t INVALID_SLOT = UINT32_MAX;
+  std::atomic<uint32_t> active_slot_{INVALID_SLOT};
+  std::atomic_flag topic_dispatch_running_ = ATOMIC_FLAG_INIT;
+  std::atomic_flag tx_running_ = ATOMIC_FLAG_INIT;
+  std::atomic_bool tx_pending_{false};
 };
