@@ -20,6 +20,7 @@ depends: []
 #include <cstdint>
 
 #include "app_framework.hpp"
+#include "flag.hpp"
 #include "message.hpp"
 #include "queue/mpmc_queue.hpp"
 #include "uart.hpp"
@@ -125,12 +126,12 @@ class SharedTopicClient : public LibXR::Application {
     // Topic 回调可能在任务与中断上下文间相互抢占。MPMCQueue 允许多个消费者，
     // 但空闲槽队列同时也由发送路径归还；消费者尚未发布完成时，归还方会把
     // 暂态窗口误判为 FULL。这里沿用背压语义，重入时直接丢弃本次更新。
-    if (topic_dispatch_running_.test_and_set(std::memory_order_acquire)) {
+    if (topic_dispatch_running_.TestAndSet()) {
       return;
     }
 
     ProcessTopic(in_isr, info, message);
-    topic_dispatch_running_.clear(std::memory_order_release);
+    topic_dispatch_running_.Clear();
   }
 
   void ProcessTopic(bool in_isr, CallbackInfo info,
@@ -162,7 +163,7 @@ class SharedTopicClient : public LibXR::Application {
 
   void RequestTx(bool in_isr) {
     tx_pending_.store(true, std::memory_order_release);
-    if (tx_running_.test_and_set(std::memory_order_acquire)) {
+    if (tx_running_.TestAndSet()) {
       return;
     }
 
@@ -171,7 +172,7 @@ class SharedTopicClient : public LibXR::Application {
       TxService(in_isr);
     } while (tx_pending_.load(std::memory_order_acquire));
 
-    tx_running_.clear(std::memory_order_release);
+    tx_running_.Clear();
   }
 
   void TxService(bool in_isr) {
@@ -219,7 +220,7 @@ class SharedTopicClient : public LibXR::Application {
   LibXR::WriteOperation tx_op_;
   static constexpr uint32_t INVALID_SLOT = UINT32_MAX;
   std::atomic<uint32_t> active_slot_{INVALID_SLOT};
-  std::atomic_flag topic_dispatch_running_ = ATOMIC_FLAG_INIT;
-  std::atomic_flag tx_running_ = ATOMIC_FLAG_INIT;
+  LibXR::Flag::Atomic topic_dispatch_running_;
+  LibXR::Flag::Atomic tx_running_;
   std::atomic_bool tx_pending_{false};
 };
