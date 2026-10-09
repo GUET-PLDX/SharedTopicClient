@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 source = (Path(__file__).resolve().parents[1] / "SharedTopicClient.hpp").read_text()
-gate = (Path(__file__).resolve().parents[1] / "SharedTopicTxGate.hpp").read_text()
+gate = source
 
 
 class AsyncTxRegression(unittest.TestCase):

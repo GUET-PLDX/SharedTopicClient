@@ -26,15 +26,15 @@ callback 先从空槽位队列申请一个 packet 槽，完成打包后把 `{槽
 pool，然后尝试交给 UART `WritePort`：
 
 - 所有 Topic 共用同一组固定 packet 槽位。
-- 空槽位用 `LockFreeQueue<uint32_t>` 管理；TX 消费完成后把槽位还回队列。
-- 待发 packet 用 `LockFreePool` 管理；message callback 打包完成后放入 pool。
-- packet 总数、空槽队列深度、待发 pool 深度相同。
-- 空槽申请失败时丢弃当前新 packet；这是全局背压，不是同 Topic 覆盖。
+- 空槽位和待发 packet 都使用 `MPMCQueue`；发送完成或提交失败后归还槽位。
+- 空闲队列额外预留一个单元，避免 Topic 消费者在 Pop 发布完成前被发送完成回调抢占时，归还槽位误报 FULL。
+- Topic 回调并发或重入时丢弃新更新；空槽申请失败时也丢弃新更新。
+- 发送门控保证最多一个未完成写入，并将同步完成回调转换为循环推进，避免逐包递归。
+- UART 提交失败（包括 BUSY/FULL）时丢弃当前包并继续处理待发队列，不重试。
+- UART 应由本模块独占；本模块不提供可靠传输、重传或对端确认。
+- 对象与槽位按 LibXR 初始化期分配模型存活至系统结束，不能在注册回调后销毁。
 
-`TxService()` 每次只尝试交付一个待发 packet，不单独维护发送锁；并发提交与写队列容量
-由 libxr `WritePort` 负责。如果 `WritePort` 暂时忙或写队列已满，当前待发 packet
-会放回待发 pool，等待写完成回调或下一次 Topic callback 再推进。这样不会为转发链路
-额外引入发送线程，也不会重复实现 `WritePort` 已经具备的互斥语义。
+实现集中在 `SharedTopicClient.hpp`，构造参数、Topic 数据和 timestamp 协议保持不变。
 
 ## Timestamp
 

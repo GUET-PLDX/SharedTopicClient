@@ -15,15 +15,55 @@ depends: []
 === END MANIFEST === */
 // clang-format on
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
-#include "SharedTopicTxGate.hpp"
 #include "app_framework.hpp"
 #include "flag.hpp"
 #include "message.hpp"
 #include "queue/mpmc_queue.hpp"
 #include "uart.hpp"
+
+class SharedTopicTxGate {
+ public:
+  static constexpr uint32_t INVALID_SLOT = UINT32_MAX;
+
+  template <typename Send>
+  void Request(Send send) {
+    pending_.store(true, std::memory_order_release);
+    if (running_.TestAndSet()) {
+      return;
+    }
+
+    do {
+      pending_.store(false, std::memory_order_release);
+      if (active_slot_.load(std::memory_order_acquire) == INVALID_SLOT) {
+        send();
+      }
+    } while (pending_.load(std::memory_order_acquire) &&
+             active_slot_.load(std::memory_order_acquire) == INVALID_SLOT);
+
+    running_.Clear();
+    if (pending_.load(std::memory_order_acquire) &&
+        active_slot_.load(std::memory_order_acquire) == INVALID_SLOT) {
+      Request(send);
+    }
+  }
+
+  void SetActive(uint32_t slot) {
+    active_slot_.store(slot, std::memory_order_release);
+  }
+
+  uint32_t Complete() {
+    return active_slot_.exchange(INVALID_SLOT, std::memory_order_acq_rel);
+  }
+
+ private:
+  std::atomic<uint32_t> active_slot_{INVALID_SLOT};
+  LibXR::Flag::Atomic running_;
+  std::atomic_bool pending_{false};
+};
 
 class SharedTopicClient : public LibXR::Application {
  private:
@@ -70,11 +110,11 @@ class SharedTopicClient : public LibXR::Application {
       auto topic = LibXR::Topic::Find(config.name, &domain);
       if (topic == nullptr) {
         XR_LOG_ERROR("Topic not found: %s/%s", config.domain, config.name);
-        ASSERT(false);
+        libxr_fatal_error(__FILE__, __LINE__, false);
       }
-      const size_t packet_size =
+      const size_t PACKET_SIZE =
           topic->data_.payload_size + LibXR::Topic::PACK_BASE_SIZE;
-      max_packet_size = LibXR::max(max_packet_size, packet_size);
+      max_packet_size = LibXR::max(max_packet_size, PACKET_SIZE);
     }
 
     ASSERT(max_packet_size <= uart_->write_port_->queue_data_->MaxSize());
@@ -82,7 +122,8 @@ class SharedTopicClient : public LibXR::Application {
     const size_t QUEUE_CAPACITY =
         LibXR::max(static_cast<size_t>(slot_count), size_t{2});
     packets_ = new PacketSlot[slot_count];
-    free_slots_ = new LibXR::MPMCQueue<uint32_t>(QUEUE_CAPACITY);
+    // One spare queue cell covers a preempted Pop before it releases its cell.
+    free_slots_ = new LibXR::MPMCQueue<uint32_t>(QUEUE_CAPACITY + 1);
     ready_packets_ = new LibXR::MPMCQueue<ReadyPacket>(QUEUE_CAPACITY);
     for (uint32_t i = 0; i < slot_count; i++) {
       packets_[i].buffer =
@@ -123,9 +164,8 @@ class SharedTopicClient : public LibXR::Application {
  private:
   void OnTopic(bool in_isr, CallbackInfo info,
                const LibXR::Topic::RawMessageView& message) {
-    // Topic 回调可能在任务与中断上下文间相互抢占。MPMCQueue 允许多个消费者，
-    // 但空闲槽队列同时也由发送路径归还；消费者尚未发布完成时，归还方会把
-    // 暂态窗口误判为 FULL。这里沿用背压语义，重入时直接丢弃本次更新。
+    // Only one free-slot consumer may be preempted; the spare queue cell
+    // covers its unpublished Pop. Concurrent/reentrant updates are dropped.
     if (topic_dispatch_running_.TestAndSet()) {
       return;
     }
