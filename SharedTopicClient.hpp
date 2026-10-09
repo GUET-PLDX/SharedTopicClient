@@ -15,10 +15,10 @@ depends: []
 === END MANIFEST === */
 // clang-format on
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
+#include "SharedTopicTxGate.hpp"
 #include "app_framework.hpp"
 #include "flag.hpp"
 #include "message.hpp"
@@ -162,17 +162,7 @@ class SharedTopicClient : public LibXR::Application {
   }
 
   void RequestTx(bool in_isr) {
-    tx_pending_.store(true, std::memory_order_release);
-    if (tx_running_.TestAndSet()) {
-      return;
-    }
-
-    do {
-      tx_pending_.store(false, std::memory_order_release);
-      TxService(in_isr);
-    } while (tx_pending_.load(std::memory_order_acquire));
-
-    tx_running_.Clear();
+    tx_gate_.Request([&] { TxService(in_isr); });
   }
 
   void TxService(bool in_isr) {
@@ -182,29 +172,26 @@ class SharedTopicClient : public LibXR::Application {
     }
 
     auto& slot = packets_[packet.slot_index];
-    active_slot_.store(packet.slot_index, std::memory_order_release);
+    tx_gate_.SetActive(packet.slot_index);
     auto write_status =
         uart_->Write(LibXR::ConstRawData{slot.buffer.addr_, packet.packet_size},
                      tx_op_, in_isr);
     if (static_cast<int8_t>(write_status) < 0) {
-      const uint32_t active_slot =
-          active_slot_.exchange(INVALID_SLOT, std::memory_order_acq_rel);
-      if (active_slot != INVALID_SLOT) {
+      const uint32_t active_slot = tx_gate_.Complete();
+      if (active_slot != SharedTopicTxGate::INVALID_SLOT) {
         ReturnFreeSlot(active_slot);
       }
+      RequestTx(in_isr);
       return;
     }
   }
 
   void OnWriteDone(bool in_isr, LibXR::ErrorCode status) {
-    const uint32_t active_slot =
-        active_slot_.exchange(INVALID_SLOT, std::memory_order_acq_rel);
-    if (active_slot != INVALID_SLOT) {
+    const uint32_t active_slot = tx_gate_.Complete();
+    if (active_slot != SharedTopicTxGate::INVALID_SLOT) {
       ReturnFreeSlot(active_slot);
     }
-    if (static_cast<int8_t>(status) < 0) {
-      return;
-    }
+    UNUSED(status);
     RequestTx(in_isr);
   }
 
@@ -218,9 +205,6 @@ class SharedTopicClient : public LibXR::Application {
   LibXR::MPMCQueue<ReadyPacket>* ready_packets_ = nullptr;
   LibXR::Callback<LibXR::ErrorCode> tx_callback_;
   LibXR::WriteOperation tx_op_;
-  static constexpr uint32_t INVALID_SLOT = UINT32_MAX;
-  std::atomic<uint32_t> active_slot_{INVALID_SLOT};
+  SharedTopicTxGate tx_gate_;
   LibXR::Flag::Atomic topic_dispatch_running_;
-  LibXR::Flag::Atomic tx_running_;
-  std::atomic_bool tx_pending_{false};
 };
