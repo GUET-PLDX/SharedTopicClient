@@ -2,15 +2,12 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: SharedTopicClient 是一个多 Topic 数据共享与串口转发客户端模块。它用于通过 UART 将多个 Topic 的数据统一打包、发送，实现消息流的串口透明同步转发，适用于分布式系统的多主题数据同步或边缘数据采集。 / SharedTopicClient is a client module for multi-topic data sharing and transparent UART forwarding. It subscribes to multiple Topics, packs their updates, and transmits them via UART, enabling efficient and reliable message synchronization over serial connections—ideal for distributed systems or edge data acquisition.
-constructor_args:
-  - uart_name: "uart_cdc"
-  - slot_count: 16
-  - topic_configs:
-    - "topic1"
-    - ["topic2", "libxr_def_domain"]
-template_args: []
-required_hardware: uart_name
+module_description: SharedTopicClient 是一个多 Topic 数据共享与串口转发客户端模块。它用于通过 UART 将多个 Topic
+  的数据统一打包、发送，实现消息流的串口透明同步转发，适用于分布式系统的多主题数据同步或边缘数据采集。 / SharedTopicClient is a client
+  module for multi-topic data sharing and transparent UART forwarding. It subscribes
+  to multiple Topics, packs their updates, and transmits them via UART, enabling efficient
+  and reliable message synchronization over serial connections—ideal for distributed
+  systems or edge data acquisition.
 depends: []
 === END MANIFEST === */
 // clang-format on
@@ -19,8 +16,8 @@ depends: []
 #include <cstddef>
 #include <cstdint>
 
-#include "app_framework.hpp"
 #include "flag.hpp"
+#include "libxr.hpp"
 #include "message.hpp"
 #include "queue/mpmc_queue.hpp"
 #include "uart.hpp"
@@ -65,7 +62,7 @@ class SharedTopicTxGate {
   std::atomic_bool pending_{false};
 };
 
-class SharedTopicClient : public LibXR::Application {
+class SharedTopicClient {
  private:
   struct CallbackInfo {
     SharedTopicClient* client;
@@ -92,13 +89,11 @@ class SharedTopicClient : public LibXR::Application {
         : name(name), domain(domain) {}
   };
 
-  SharedTopicClient(LibXR::HardwareContainer& hw,
-                    LibXR::ApplicationManager& app, const char* uart_name,
-                    uint32_t slot_count,
+  SharedTopicClient(LibXR::UART& uart, uint32_t slot_count,
                     std::initializer_list<TopicConfig> topic_configs)
-      : uart_(hw.template FindOrExit<LibXR::UART>({uart_name})) {
+      : uart_((&uart)) {
     ASSERT(uart_->write_port_ != nullptr);
-    ASSERT(uart_->write_port_->queue_data_ != nullptr);
+    ASSERT(uart_->write_port_->Writable());
     ASSERT(uart_->write_port_->Writable());
     ASSERT(topic_configs.size() > 0);
     ASSERT(slot_count > 0);
@@ -117,7 +112,7 @@ class SharedTopicClient : public LibXR::Application {
       max_packet_size = LibXR::max(max_packet_size, PACKET_SIZE);
     }
 
-    ASSERT(max_packet_size <= uart_->write_port_->queue_data_->MaxSize());
+    ASSERT(max_packet_size <= uart_->write_port_->Capacity());
 
     const size_t QUEUE_CAPACITY =
         LibXR::max(static_cast<size_t>(slot_count), size_t{2});
@@ -155,11 +150,9 @@ class SharedTopicClient : public LibXR::Application {
 
       topic.RegisterCallback(msg_cb);
     }
-
-    app.Register(*this);
   }
 
-  void OnMonitor() override {}
+  void OnMonitor() {}
 
  private:
   void OnTopic(bool in_isr, CallbackInfo info,

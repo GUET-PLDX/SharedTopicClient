@@ -2,7 +2,7 @@
 set -euo pipefail
 test_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 module_root="$(cd "$test_dir/../.." && pwd)"
-libxr="$module_root/../Middlewares/Third_Party/LibXR"
+libxr="$module_root/../.tooling/LibXR-v2.0.1"
 includes=()
 while IFS= read -r -d '' path; do includes+=(-isystem "$path"); done < <(find "$libxr/src" -type d -print0)
 "${CXX:-c++}" -std=c++20 -DXR_LOG_MESSAGE_MAX_LEN=128 -DLIBXR_DEFAULT_SCALAR=float -Wall -Wextra -Werror \
