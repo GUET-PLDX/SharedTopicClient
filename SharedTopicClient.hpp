@@ -89,11 +89,12 @@ class SharedTopicClient {
         : name(name), domain(domain) {}
   };
 
-  SharedTopicClient(LibXR::UART& uart, uint32_t slot_count,
-                    std::initializer_list<TopicConfig> topic_configs)
-      : uart_((&uart)) {
+  SharedTopicClient(LibXR::UART& uart, uint32_t slot_count = 16,
+                    std::initializer_list<TopicConfig> topic_configs =
+                        {"topic1", {"topic2", "libxr_def_domain"}})
+      : uart_(&uart) {
     ASSERT(uart_->write_port_ != nullptr);
-    ASSERT(uart_->write_port_->Writable());
+    ASSERT(uart_->write_port_->Capacity() > 0);
     ASSERT(uart_->write_port_->Writable());
     ASSERT(topic_configs.size() > 0);
     ASSERT(slot_count > 0);
