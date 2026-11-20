@@ -233,12 +233,13 @@ class SharedTopicClient {
     ASSERT(free_slots_->Push(slot_index) == LibXR::ErrorCode::OK);
   }
 
+  SharedTopicTxGate tx_gate_;
+  LibXR::Flag::Atomic topic_dispatch_running_;
+
   LibXR::UART* uart_;
   PacketSlot* packets_ = nullptr;
   LibXR::MPMCQueue<uint32_t>* free_slots_ = nullptr;
   LibXR::MPMCQueue<ReadyPacket>* ready_packets_ = nullptr;
   LibXR::Callback<LibXR::ErrorCode> tx_callback_;
   LibXR::WriteOperation tx_op_;
-  SharedTopicTxGate tx_gate_;
-  LibXR::Flag::Atomic topic_dispatch_running_;
 };
